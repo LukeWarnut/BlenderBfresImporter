@@ -123,9 +123,104 @@ def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Mate
             __shader_hoian(mat, mat_wrap)
 
     __layer_masked_albedo(mat, mat_wrap, unused_nodes)
+    # Alpha first: it takes the alpha from the image plugged into Base Color, which the graphs replace.
     __setup_alpha(fmat, mat, mat_wrap)
+    __apply_known_graphs(mat, mat_wrap)
 
     return mat
+
+
+# Shader expression graphs (Ocarina of Time on Switch 2) whose effect on the albedo is approximated here.
+# The graphs themselves are only stored as a hash, so this was worked out from the textures and parameters.
+EYE_SURFACE_GRAPH = "2937883399"  # ns_overwrite_surface_graph of character eyes (Mt_Eye_Inner)
+STRAND_EXPRESSION_GRAPH = "2221926229"  # ns_expression_evaluate_graph of eyebrows and eyelashes
+
+
+def __apply_known_graphs(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
+    if mat.get("SO_ns_overwrite_surface_graph") == EYE_SURFACE_GRAPH:
+        __eye_graph(mat, mat_wrap)
+    if mat.get("SO_ns_expression_evaluate_graph") == STRAND_EXPRESSION_GRAPH:
+        __strand_graph(mat, mat_wrap)
+
+
+def __param_color(mat: bpy.types.Material, name: str):
+    value = mat.get("MP_" + name)
+    if value is None or len(value) < 3:
+        return None
+    return (value[0], value[1], value[2], 1.0)
+
+
+def __eye_graph(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
+    """Size and recolor the shared iris texture like the character eye shader does.
+
+    - ns_param_scalar3 scales the iris and its mask around the middle of the UVs (bigger = smaller iris).
+    - ns_param_color2 is a hue/saturation/value adjustment of the iris, with 0.5 meaning no change.
+    """
+    tree = mat.node_tree
+    mix = next((n for n in tree.nodes if n.type == "MIX" and n.label == "Albedo Mask"), None)
+    if mix is None or not mix.inputs[0].is_linked or not mix.inputs[7].is_linked:
+        return
+    mask_node = mix.inputs[0].links[0].from_node
+    iris_socket = mix.inputs[7].links[0].from_socket
+    iris_node = iris_socket.node
+
+    scale = mat.get("MP_ns_param_scalar3")
+    if scale is not None and mask_node.type == "TEX_IMAGE" and iris_node.type == "TEX_IMAGE":
+        vector_links = iris_node.inputs["Vector"].links
+        if vector_links:
+            uv_socket = vector_links[0].from_socket
+        else:
+            uv_socket = tree.nodes.new(type="ShaderNodeTexCoord").outputs["UV"]
+            uv_socket.node.location = iris_node.location.x - 500, iris_node.location.y
+        mapping = tree.nodes.new(type="ShaderNodeMapping")
+        mapping.label = "Iris Scale"
+        mapping.location = iris_node.location.x - 250, iris_node.location.y
+        mapping.inputs["Scale"].default_value = (scale, scale, 1.0)
+        mapping.inputs["Location"].default_value = (0.5 - 0.5 * scale, 0.5 - 0.5 * scale, 0.0)
+        tree.links.new(uv_socket, mapping.inputs["Vector"])
+        tree.links.new(mapping.outputs["Vector"], iris_node.inputs["Vector"])
+        tree.links.new(mapping.outputs["Vector"], mask_node.inputs["Vector"])
+        # The scaled UVs go outside 0-1, where the mask has to stay black instead of repeating.
+        iris_node.extension = "EXTEND"
+        mask_node.extension = "EXTEND"
+
+    hsv = __param_color(mat, "ns_param_color2")
+    if hsv is not None:
+        node = tree.nodes.new(type="ShaderNodeHueSaturation")
+        node.label = "Iris Color"
+        node.location = mix.location.x - 200, mix.location.y - 250
+        node.inputs["Hue"].default_value = hsv[0]
+        node.inputs["Saturation"].default_value = hsv[1] * 2
+        node.inputs["Value"].default_value = hsv[2] * 2
+        tree.links.new(iris_socket, node.inputs["Color"])
+        tree.links.new(node.outputs["Color"], mix.inputs[7])
+
+
+def __strand_graph(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
+    """Color eyebrows and eyelashes.
+
+    Their albedo texture is a grayscale gradient along each strand, which the shader maps from
+    ns_param_color2 (root) to ns_param_color3 (tip).
+    """
+    root = __param_color(mat, "ns_param_color2")
+    tip = __param_color(mat, "ns_param_color3")
+    base_color = mat_wrap.node_principled_bsdf.inputs["Base Color"]
+    if root is None or tip is None or not base_color.is_linked:
+        return
+
+    tree = mat.node_tree
+    source = base_color.links[0].from_socket
+    separate = tree.nodes.new(type="ShaderNodeSeparateColor")
+    separate.location = source.node.location.x + 300, source.node.location.y + 200
+    gradient = tree.nodes.new(type="ShaderNodeMix")
+    gradient.data_type = "RGBA"
+    gradient.label = "Strand Color"
+    gradient.location = separate.location.x + 200, separate.location.y
+    gradient.inputs[6].default_value = root
+    gradient.inputs[7].default_value = tip
+    tree.links.new(source, separate.inputs["Color"])
+    tree.links.new(separate.outputs[0], gradient.inputs[0])
+    tree.links.new(gradient.outputs[2], base_color)
 
 
 def __layer_masked_albedo(mat, mat_wrap: PrincipledBSDFWrapper, unused_nodes):
