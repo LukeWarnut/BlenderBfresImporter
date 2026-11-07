@@ -98,7 +98,71 @@ def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Mate
         case "Hoian_UBER":
             __shader_hoian(mat, mat_wrap)
 
+    __setup_alpha(fmat, mat, mat_wrap)
+
     return mat
+
+
+def __render_info(fmat: Material, name: str):
+    """Return the first value of a render info, or None if the material doesn't have it."""
+    info = fmat.renderinfos.try_get_value(name)
+    if info is None or not info.data:
+        return None
+    return info.data[0]
+
+
+def __setup_alpha(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
+    """Use the base color texture's alpha for transparency, based on the material's render state."""
+    mode = __render_info(fmat, "gsys_render_state_mode")
+    blend_mode = __render_info(fmat, "gsys_render_state_blend_mode")
+    alpha_test = mode == "mask" or __render_info(fmat, "gsys_alpha_test_enable") == "true"
+    translucent = mode == "translucent" or (mode == "custom" and blend_mode not in {None, "none"})
+    if not (alpha_test or translucent):
+        return
+
+    tree = mat.node_tree
+    principled = mat_wrap.node_principled_bsdf
+    alpha_input = principled.inputs["Alpha"]
+    if not alpha_input.is_linked:
+        # Take the alpha from the image plugged into Base Color, if it has one.
+        base_links = principled.inputs["Base Color"].links
+        image_node = base_links[0].from_node if base_links else None
+        if image_node is None or image_node.type != "TEX_IMAGE" or image_node.image is None:
+            return
+        if image_node.image.alpha_mode == "NONE" or image_node.image.channels < 4:
+            return
+        tree.links.new(image_node.outputs["Alpha"], alpha_input)
+
+    threshold = __render_info(fmat, "gsys_alpha_test_value")
+    if threshold is None:
+        param = fmat.shaderparams.try_get_value("gsys_alpha_test_ref_value")
+        threshold = param.data if param is not None else 0.5
+
+    legacy = not hasattr(mat, "surface_render_method")  # Blender < 4.2
+    if translucent:
+        if legacy:
+            mat.blend_method = "BLEND"
+            mat.shadow_method = "HASHED"
+        else:
+            mat.surface_render_method = "BLENDED"
+    elif legacy:
+        mat.blend_method = "CLIP"
+        mat.shadow_method = "CLIP"
+        mat.alpha_threshold = threshold
+    else:
+        # EEVEE Next has no alpha clip mode, so make the cutout hard with a math node like the game does.
+        source = alpha_input.links[0].from_socket
+        clip = tree.nodes.new(type="ShaderNodeMath")
+        clip.operation = "GREATER_THAN"
+        clip.label = "Alpha Test"
+        clip.inputs[1].default_value = threshold
+        clip.location = principled.location.x - 200, principled.location.y - 400
+        tree.links.new(source, clip.inputs[0])
+        tree.links.new(clip.outputs["Value"], alpha_input)
+        mat.surface_render_method = "DITHERED"
+
+    if __render_info(fmat, "gsys_render_state_display_face") == "front":
+        mat.use_backface_culling = True
 
 
 def set_uv_coords(mat: bpy.types.Material, sampler: str, tex_node: bpy.types.ShaderNodeTexImage):
