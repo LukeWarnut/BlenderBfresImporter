@@ -83,6 +83,12 @@ class ImportBFRES(bpy.types.Operator, ImportHelper):
         default=True,
     )
 
+    wet_effect: BoolProperty(
+        name="Wet Look",
+        description="Use the water droplet masks some games pack into their textures, making surfaces look wet",
+        default=False,
+    )
+
     custom_normals: BoolProperty(
         name="Custom Normals",
         description="Uses the n0 attribute of the model to compute the normals.",
@@ -184,6 +190,7 @@ def import_panel_material(layout, operator):
         body = layout.column(align=False)
     if body:
         body.prop(operator, "name_prefix")
+        body.prop(operator, "wet_effect")
 
 
 def import_panel_misc(layout, operator):

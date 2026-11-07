@@ -19,7 +19,9 @@ class ModelImporter:
         material_map = {}
         for i, fmat in enumerate(fmdl.materials.values()):
             log.info("Importing material %3d / %3d...", i + 1, len(fmdl.materials))
-            mat = import_material(fmat, self.texture_map, self.operator.name_prefix)
+            mat = import_material(
+                fmat, self.texture_map, self.operator.name_prefix, getattr(self.operator, "wet_effect", False)
+            )
             material_map[i] = mat
 
         # Go through the polygons in this model and create mesh objects representing them.

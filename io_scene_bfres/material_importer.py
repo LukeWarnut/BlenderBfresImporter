@@ -48,7 +48,7 @@ def __slot_from_texture_name(tex_name: str) -> str | None:
     return TEX_NAME_SUFFIX.get(tex_name.rsplit("_", 1)[-1])
 
 
-def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Material:
+def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False) -> bpy.types.Material:
     """Import specified material from fmat."""
     mat = bpy.data.materials.new(name=name_prefix + fmat.name)
     mat.use_nodes = True
@@ -123,6 +123,7 @@ def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Mate
             __shader_hoian(mat, mat_wrap)
 
     __layer_masked_albedo(mat, mat_wrap, unused_nodes)
+    __split_packed_roughness(mat, mat_wrap, wet_effect)
     # Alpha first: it takes the alpha from the image plugged into Base Color, which the graphs replace.
     __setup_alpha(fmat, mat, mat_wrap)
     __apply_known_graphs(mat, mat_wrap)
@@ -221,6 +222,37 @@ def __strand_graph(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
     tree.links.new(source, separate.inputs["Color"])
     tree.links.new(separate.outputs[0], gradient.inputs[0])
     tree.links.new(gradient.outputs[2], base_color)
+
+
+def __split_packed_roughness(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper, wet_effect: bool):
+    """Use only the roughness channel of packed "Gn" textures plugged into Roughness.
+
+    These store roughness in red and a water droplet mask in green (dark = droplet), which the game only
+    uses while a character is wet. Plugging the whole image in averages the two, so dry surfaces look wet.
+    """
+    roughness = mat_wrap.node_principled_bsdf.inputs["Roughness"]
+    if not roughness.is_linked:
+        return
+    image_node = roughness.links[0].from_node
+    if image_node.type != "TEX_IMAGE" or image_node.image is None:
+        return
+    if not image_node.image.name.rsplit("_", 1)[-1].startswith("Gn"):
+        return
+
+    tree = mat.node_tree
+    separate = tree.nodes.new(type="ShaderNodeSeparateColor")
+    separate.location = image_node.location.x + 300, image_node.location.y
+    tree.links.new(image_node.outputs["Color"], separate.inputs["Color"])
+    if wet_effect:
+        wet = tree.nodes.new(type="ShaderNodeMath")
+        wet.operation = "MULTIPLY"
+        wet.label = "Wet Look"
+        wet.location = separate.location.x + 200, separate.location.y
+        tree.links.new(separate.outputs[0], wet.inputs[0])
+        tree.links.new(separate.outputs[1], wet.inputs[1])
+        tree.links.new(wet.outputs["Value"], roughness)
+    else:
+        tree.links.new(separate.outputs[0], roughness)
 
 
 def __layer_masked_albedo(mat, mat_wrap: PrincipledBSDFWrapper, unused_nodes):
