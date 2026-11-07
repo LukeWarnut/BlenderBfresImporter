@@ -31,7 +31,7 @@ def __get_vtx_attributes(fvtx, first_vtx: int) -> dict:
         data = [None] * num_vtx
         for i in range(num_vtx):
             try:
-                offset = (first_vtx + i) * buffer.stride
+                offset = (first_vtx + i) * buffer.stride + attribute.offset
                 data[i] = struct.unpack_from(fmt.read, buffer.data[0], offset)
             except struct.error as e:
                 message = f"Vertex {i} reading out of bounds for attribute '{attribute.name}'"
@@ -213,10 +213,14 @@ def add_vtx_weights(mesh_ob: bpy.types.Object, fmdl, fshp, lod_vtxs):
             idx = lod_vtxs["_i0"][vertex_id][0]
             groups[idx].add([vertex_id], 1, "REPLACE")
         return
+    # Smooth skinning: up to 4 influences per attribute set; models with more
+    # than 4 influences store the rest in _i1/_w1, _i2/_w2, ...
+    idx_sets = [lod_vtxs[f"_i{n}"] for n in range(8) if f"_i{n}" in lod_vtxs]
+    wgt_sets = [lod_vtxs[f"_w{n}"] for n in range(8) if f"_w{n}" in lod_vtxs]
     for vertex_id in range(len(lod_vtxs["_i0"])):
-        # Smooth skinning, bone index and weight
-        weight = lod_vtxs["_w0"][vertex_id][: fshp.vtx_skin_count]
-        idx = lod_vtxs["_i0"][vertex_id]
-        for i in range(fshp.vtx_skin_count):
+        idx = [v for s in idx_sets for v in s[vertex_id]]
+        weight = [v for s in wgt_sets for v in s[vertex_id]]
+        count = min(fshp.vtx_skin_count, len(idx), len(weight))
+        for i in range(count):
             if weight[i] > 0 and idx[i] in groups:
-                groups[idx[i]].add([vertex_id], weight[i] / 255.0, "REPLACE")
+                groups[idx[i]].add([vertex_id], float(weight[i]), "REPLACE")
