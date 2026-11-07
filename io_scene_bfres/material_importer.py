@@ -30,6 +30,22 @@ TEXCOORD_SELECT = {
     "_su0": "teamcolormap",
     "_t0": "trsmap",  # unsure if this is opacity or trm
 }
+# Texture name suffixes that say what a texture is, mapped to a TEX_WRAPPER sampler.
+# Newer games (e.g. Ocarina of Time on Switch 2) don't use fixed shader sampler names,
+# but name their textures consistently.
+TEX_NAME_SUFFIX = {
+    "Alb": "_a0",
+    "Nrm": "_n0",
+    "Rgh": "_r0",
+    "Mtl": "_m0",
+    "Emc": "_e0",
+    "Emm": "_e0",
+}
+
+
+def __slot_from_texture_name(tex_name: str) -> str | None:
+    """Return the sampler a texture should use based on its name suffix, if it has a known one."""
+    return TEX_NAME_SUFFIX.get(tex_name.rsplit("_", 1)[-1])
 
 
 def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Material:
@@ -40,8 +56,13 @@ def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Mate
     __add_custom_properties(fmat, mat)
 
     mappingnode = None
-    # Samplers and texture references are parallel lists.
-    for sampler, tex_ref in zip(fmat.samplers.keys(), fmat.texture_refs):
+    used_slots = set()
+    unused_nodes: list[tuple[str, bpy.types.ShaderNodeTexImage]] = []
+    # Samplers and texture references are parallel lists. Textures whose name says what they are
+    # go first, so a texture placed by the shader's sampler names can't take their slot.
+    textures = list(zip(fmat.samplers.keys(), fmat.texture_refs))
+    textures.sort(key=lambda t: __slot_from_texture_name(t[1].name) is None)
+    for sampler, tex_ref in textures:
         tex_name = tex_ref.name
         if tex_name in texture_dict:
             image = texture_dict[tex_name]
@@ -53,20 +74,23 @@ def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Mate
             continue
 
         tex_sampler_name = fmat.shader_assign.sampler_assigns.key_from_value(ResString(sampler))
+        slot = __slot_from_texture_name(tex_name) or tex_sampler_name
 
-        # Get the bpy Texture Wrapper from the sampler name
-        tex_helper_name = TEX_WRAPPER.get(tex_sampler_name)
+        # Get the bpy Texture Wrapper from the sampler name. Each slot only takes one texture.
+        tex_helper_name = TEX_WRAPPER.get(slot) if slot not in used_slots else None
         if tex_helper_name:
+            used_slots.add(slot)
             tex_helper: ShaderImageTextureWrapper = getattr(mat_wrap, tex_helper_name)
             tex_helper.image = image
         else:
             # Add the texture as a node not connected to anything if no samplers match
             tex_node = mat.node_tree.nodes.new(type="ShaderNodeTexImage")
-            log.warning("Unused texture: %s", tex_name)
-            tex_node.location = mathutils.Vector(mat_wrap._grid_to_location(1, -2))
+            log.info("Unused texture: %s", tex_name)
+            tex_node.location = mathutils.Vector(mat_wrap._grid_to_location(1, -2 - len(unused_nodes)))
             tex_node.label = f"{tex_sampler_name} {tex_name}"
             tex_node.image = image
             set_uv_coords(mat, tex_sampler_name, tex_node)
+            unused_nodes.append((tex_name, tex_node))
             continue
 
         # Mapping
@@ -98,9 +122,33 @@ def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Mate
         case "Hoian_UBER":
             __shader_hoian(mat, mat_wrap)
 
+    __layer_masked_albedo(mat, mat_wrap, unused_nodes)
     __setup_alpha(fmat, mat, mat_wrap)
 
     return mat
+
+
+def __layer_masked_albedo(mat, mat_wrap: PrincipledBSDFWrapper, unused_nodes):
+    """Blend a second albedo texture under the first one using a mask texture.
+
+    Used by e.g. eyes, which have an iris and a sclera albedo and a mask for where the iris is.
+    """
+    extra_albedos = [node for name, node in unused_nodes if name.endswith("_Alb")]
+    masks = [node for name, node in unused_nodes if "Mask" in name]
+    base_links = mat_wrap.node_principled_bsdf.inputs["Base Color"].links
+    if len(extra_albedos) != 1 or len(masks) != 1 or not base_links:
+        return
+
+    tree = mat.node_tree
+    mix = tree.nodes.new(type="ShaderNodeMix")
+    mix.data_type = "RGBA"
+    mix.label = "Albedo Mask"
+    mix.location = mathutils.Vector(mat_wrap._grid_to_location(0, 1))
+    # The mask is white where the first albedo goes.
+    tree.links.new(masks[0].outputs["Color"], mix.inputs[0])
+    tree.links.new(extra_albedos[0].outputs["Color"], mix.inputs[6])
+    tree.links.new(base_links[0].from_socket, mix.inputs[7])
+    tree.links.new(mix.outputs[2], mat_wrap.node_principled_bsdf.inputs["Base Color"])
 
 
 def __render_info(fmat: Material, name: str):
@@ -109,6 +157,42 @@ def __render_info(fmat: Material, name: str):
     if info is None or not info.data:
         return None
     return info.data[0]
+
+
+def __apply_alpha_select(fmat: Material, mat: bpy.types.Material, principled):
+    """Handle shaders that pick the alpha from a texture channel with a shader option.
+
+    Some newer shaders (e.g. Ocarina of Time on Switch 2) have an "ns_alpha_select" option, where "2NN" means
+    the first channel of texture NN. When the albedo doesn't come from a texture too, the material is a
+    darkening overlay like the shadow over the eyes, so the texture is only used as a mask.
+    """
+    alpha_select = mat.get("SO_ns_alpha_select", "")
+    albedo_select = mat.get("SO_ns_albedo_select", "")
+    if not (len(alpha_select) == 3 and alpha_select.startswith("2") and alpha_select.isdigit()):
+        return
+    if albedo_select.startswith("2") or albedo_select in {"", "<default value>"}:
+        return
+    index = int(alpha_select[1:])
+    if index >= len(fmat.texture_refs):
+        return
+
+    tex_name = fmat.texture_refs[index].name
+    tree = mat.node_tree
+    image_node = next(
+        (n for n in tree.nodes if n.type == "TEX_IMAGE" and n.image and n.image.name.endswith(tex_name)), None
+    )
+    if image_node is None:
+        return
+
+    separate = tree.nodes.new(type="ShaderNodeSeparateColor")
+    separate.location = principled.location.x - 250, principled.location.y - 550
+    tree.links.new(image_node.outputs["Color"], separate.inputs["Color"])
+    tree.links.new(separate.outputs[0], principled.inputs["Alpha"])
+
+    base_color = principled.inputs["Base Color"]
+    for link in list(base_color.links):
+        tree.links.remove(link)
+    base_color.default_value = (0.0, 0.0, 0.0, 1.0)
 
 
 def __setup_alpha(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
@@ -120,9 +204,43 @@ def __setup_alpha(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledB
     if not (alpha_test or translucent):
         return
 
+    if __render_info(fmat, "gsys_render_state_display_face") == "front":
+        mat.use_backface_culling = True
+
     tree = mat.node_tree
     principled = mat_wrap.node_principled_bsdf
+    legacy = not hasattr(mat, "surface_render_method")  # Blender < 4.2
+
+    # Additive blending (e.g. fake eye highlights): only light gets added on top of what's behind.
+    rgb_src = __render_info(fmat, "gsys_color_blend_rgb_src_func")
+    rgb_dst = __render_info(fmat, "gsys_color_blend_rgb_dst_func")
+    if translucent and rgb_dst == "one" and rgb_src in {"one", "src_alpha"}:
+        emission_input = principled.inputs.get("Emission Color") or principled.inputs.get("Emission")
+        for color_input in (emission_input, principled.inputs["Base Color"]):
+            if color_input is not None and color_input.is_linked:
+                color_source = color_input.links[0].from_socket
+                break
+        else:
+            return
+        emission = tree.nodes.new(type="ShaderNodeEmission")
+        transparent = tree.nodes.new(type="ShaderNodeBsdfTransparent")
+        add = tree.nodes.new(type="ShaderNodeAddShader")
+        emission.location = principled.location.x + 300, principled.location.y - 300
+        transparent.location = principled.location.x + 300, principled.location.y - 450
+        add.location = principled.location.x + 500, principled.location.y - 350
+        tree.links.new(color_source, emission.inputs["Color"])
+        tree.links.new(emission.outputs["Emission"], add.inputs[0])
+        tree.links.new(transparent.outputs["BSDF"], add.inputs[1])
+        tree.links.new(add.outputs["Shader"], mat_wrap.node_out.inputs["Surface"])
+        if legacy:
+            mat.blend_method = "BLEND"
+            mat.shadow_method = "NONE"
+        else:
+            mat.surface_render_method = "BLENDED"
+        return
+
     alpha_input = principled.inputs["Alpha"]
+    __apply_alpha_select(fmat, mat, principled)
     if not alpha_input.is_linked:
         # Take the alpha from the image plugged into Base Color, if it has one.
         base_links = principled.inputs["Base Color"].links
@@ -138,7 +256,6 @@ def __setup_alpha(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledB
         param = fmat.shaderparams.try_get_value("gsys_alpha_test_ref_value")
         threshold = param.data if param is not None else 0.5
 
-    legacy = not hasattr(mat, "surface_render_method")  # Blender < 4.2
     if translucent:
         if legacy:
             mat.blend_method = "BLEND"
@@ -160,9 +277,6 @@ def __setup_alpha(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledB
         tree.links.new(source, clip.inputs[0])
         tree.links.new(clip.outputs["Value"], alpha_input)
         mat.surface_render_method = "DITHERED"
-
-    if __render_info(fmat, "gsys_render_state_display_face") == "front":
-        mat.use_backface_culling = True
 
 
 def set_uv_coords(mat: bpy.types.Material, sampler: str, tex_node: bpy.types.ShaderNodeTexImage):
