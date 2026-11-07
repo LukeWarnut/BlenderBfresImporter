@@ -48,7 +48,7 @@ def __slot_from_texture_name(tex_name: str) -> str | None:
     return TEX_NAME_SUFFIX.get(tex_name.rsplit("_", 1)[-1])
 
 
-def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False) -> bpy.types.Material:
+def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False, report=None) -> bpy.types.Material:
     """Import specified material from fmat."""
     mat = bpy.data.materials.new(name=name_prefix + fmat.name)
     mat.use_nodes = True
@@ -58,6 +58,7 @@ def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False)
     mappingnode = None
     used_slots = set()
     unused_nodes: list[tuple[str, bpy.types.ShaderNodeTexImage]] = []
+    missing_textures: list[str] = []
     # Samplers and texture references are parallel lists. Textures whose name says what they are
     # go first, so a texture placed by the shader's sampler names can't take their slot.
     textures = list(zip(fmat.samplers.keys(), fmat.texture_refs))
@@ -71,6 +72,7 @@ def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False)
 
         if image is None:
             log.warning("Missing Texture: '%s'", tex_name)
+            missing_textures.append(tex_name)
             continue
 
         tex_sampler_name = fmat.shader_assign.sampler_assigns.key_from_value(ResString(sampler))
@@ -125,7 +127,8 @@ def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False)
     __layer_masked_albedo(mat, mat_wrap, unused_nodes)
     __split_packed_roughness(mat, mat_wrap, wet_effect)
     # Alpha first: it takes the alpha from the image plugged into Base Color, which the graphs replace.
-    __setup_alpha(fmat, mat, mat_wrap)
+    missing_albedo = any(__slot_from_texture_name(name) == "_a0" for name in missing_textures)
+    __setup_alpha(fmat, mat, mat_wrap, missing_albedo, report)
     __apply_known_graphs(mat, mat_wrap)
 
     return mat
@@ -322,7 +325,9 @@ def __apply_alpha_select(fmat: Material, mat: bpy.types.Material, principled):
     base_color.default_value = (0.0, 0.0, 0.0, 1.0)
 
 
-def __setup_alpha(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
+def __setup_alpha(
+    fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper, missing_albedo=False, report=None
+):
     """Use the base color texture's alpha for transparency, based on the material's render state."""
     mode = __render_info(fmat, "gsys_render_state_mode")
     blend_mode = __render_info(fmat, "gsys_render_state_blend_mode")
@@ -372,6 +377,21 @@ def __setup_alpha(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledB
         # Take the alpha from the image plugged into Base Color, if it has one.
         base_links = principled.inputs["Base Color"].links
         image_node = base_links[0].from_node if base_links else None
+        if image_node is None and missing_albedo:
+            # The albedo holds the cutout mask (e.g. eyebrow cards), so without it there's nothing to show.
+            # Some games reference textures that aren't in the dump; hide the surface instead of drawing
+            # a solid card.
+            msg = f"Hid material '{mat.name}': its albedo texture (which has the alpha mask) is missing"
+            log.warning(msg)
+            if report is not None:
+                report({"WARNING"}, msg)
+            alpha_input.default_value = 0.0
+            if legacy:
+                mat.blend_method = "CLIP"
+                mat.shadow_method = "CLIP"
+            else:
+                mat.surface_render_method = "DITHERED"
+            return
         if image_node is None or image_node.type != "TEX_IMAGE" or image_node.image is None:
             return
         if image_node.image.alpha_mode == "NONE" or image_node.image.channels < 4:

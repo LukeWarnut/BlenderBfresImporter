@@ -20,7 +20,11 @@ class ModelImporter:
         for i, fmat in enumerate(fmdl.materials.values()):
             log.info("Importing material %3d / %3d...", i + 1, len(fmdl.materials))
             mat = import_material(
-                fmat, self.texture_map, self.operator.name_prefix, getattr(self.operator, "wet_effect", False)
+                fmat,
+                self.texture_map,
+                self.operator.name_prefix,
+                getattr(self.operator, "wet_effect", False),
+                report=self.operator.report,
             )
             material_map[i] = mat
 

@@ -149,22 +149,31 @@ class Importer:
             log.info("No Tex folder found at: %s", texfolder)
             return
 
+        not_found = []
         failed = []
         for i, name in enumerate(sorted(missing)):
             texpath = romfs.find_texture_file(texfolder, name)
             if texpath is None:
                 log.warning("Texture file not found in Tex folder: %s", name)
-                failed.append(name)
+                not_found.append(name)
                 continue
             log.info("Importing texture file %3d/%3d: %s", i + 1, len(missing), texpath.name)
             try:
                 self.run_file(texpath)
-            except Exception:
+            except Exception as ex:
                 log.exception("Failed to import texture file: %s", texpath)
-                failed.append(name)
+                failed.append(f"{name} ({type(ex).__name__}: {ex})")
+
+        # Show the details in Blender's Info log, where the user sees the warning.
+        if not_found:
+            self.operator.report(
+                {"WARNING"}, f"{len(not_found)} texture(s) not found in {texfolder}: {', '.join(not_found)}"
+            )
         if failed:
             self.operator.report(
-                {"WARNING"}, f"{len(failed)} texture(s) could not be imported, see the console for details"
+                {"WARNING"},
+                f"{len(failed)} texture(s) could not be decoded (full error in Window > Toggle System Console): "
+                + ", ".join(failed),
             )
 
     def _missing_textures(self, bfres: ResFile) -> set[str]:
