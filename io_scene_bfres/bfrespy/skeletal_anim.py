@@ -322,7 +322,8 @@ class BoneAnimFlagsTransform(IntFlag):
 class BoneAnimData:
     """Represents the animatable data of a Bone instance."""
 
-    def __init__(self, loader: core.ResFileLoader, flags):
+    # The defaults are for bone animations without base data (its offset is 0), where nothing is read.
+    def __init__(self, loader: core.ResFileLoader | None = None, flags=BoneAnimFlagsBase(0)):
         self._flags = 0  # Never in files.
         self.scale = loader.read_vector3f() if BoneAnimFlagsBase.SCALE in flags else (1, 1, 1)
         self.rotate = loader.read_vector4f() if BoneAnimFlagsBase.ROTATE in flags else (1, 0, 0, 0)

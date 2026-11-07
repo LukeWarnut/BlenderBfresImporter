@@ -1,4 +1,5 @@
 import logging
+import re
 
 import bpy
 import mathutils
@@ -16,6 +17,7 @@ TEX_WRAPPER = {
     "_n0": "normalmap_texture",
     "_e0": "emission_color_texture",
     "_op0": "alpha_texture",
+    "_mra": "metallic_texture",  # packed metalness, roughness and AO, split by __split_mra
 }
 TEXCOORD_SELECT = {
     "_ao0": "ao",
@@ -40,12 +42,17 @@ TEX_NAME_SUFFIX = {
     "Mtl": "_m0",
     "Emc": "_e0",
     "Emm": "_e0",
+    # Kirby and the Forgotten Land, where every sampler is a generic "albedoN"
+    "BaseColor": "_a0",
+    "Normal": "_n0",
+    "MRA": "_mra",
 }
 
 
 def __slot_from_texture_name(tex_name: str) -> str | None:
     """Return the sampler a texture should use based on its name suffix, if it has a known one."""
-    return TEX_NAME_SUFFIX.get(tex_name.rsplit("_", 1)[-1])
+    # Kirby and the Forgotten Land ends texture names with a hash, e.g. "BodyC_BaseColor.59531894".
+    return TEX_NAME_SUFFIX.get(tex_name.split(".", 1)[0].rsplit("_", 1)[-1])
 
 
 def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False, report=None) -> bpy.types.Material:
@@ -60,9 +67,17 @@ def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False,
     unused_nodes: list[tuple[str, bpy.types.ShaderNodeTexImage]] = []
     missing_textures: list[str] = []
     # Samplers and texture references are parallel lists. Textures whose name says what they are
-    # go first, so a texture placed by the shader's sampler names can't take their slot.
+    # go first, so a texture placed by the shader's sampler names can't take their slot. Of those, the
+    # ones named after the material come first: layered materials (e.g. Kirby and the Forgotten Land's
+    # stages) also use other materials' textures, like a dirt overlay, before their own.
+    def priority(texture) -> int:
+        name = texture[1].name
+        if __slot_from_texture_name(name) is None:
+            return 2
+        return 0 if name.startswith(fmat.name + "_") else 1
+
     textures = list(zip(fmat.samplers.keys(), fmat.texture_refs))
-    textures.sort(key=lambda t: __slot_from_texture_name(t[1].name) is None)
+    textures.sort(key=priority)
     for sampler, tex_ref in textures:
         tex_name = tex_ref.name
         if tex_name in texture_dict:
@@ -125,6 +140,9 @@ def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False,
             __shader_hoian(mat, mat_wrap)
 
     __layer_masked_albedo(mat, mat_wrap, unused_nodes)
+    __face_pattern(mat, mat_wrap, unused_nodes)
+    __second_layer(mat, mat_wrap, unused_nodes)
+    __split_mra(mat, mat_wrap)
     __split_packed_roughness(mat, mat_wrap, wet_effect)
     # Alpha first: it takes the alpha from the image plugged into Base Color, which the graphs replace.
     missing_albedo = any(__slot_from_texture_name(name) == "_a0" for name in missing_textures)
@@ -225,6 +243,129 @@ def __strand_graph(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
     tree.links.new(source, separate.inputs["Color"])
     tree.links.new(separate.outputs[0], gradient.inputs[0])
     tree.links.new(gradient.outputs[2], base_color)
+
+
+# Frames of a texture pattern animation (e.g. eye expressions) are named "<texture>.00", "<texture>.01", ...
+PATTERN_FRAME = re.compile(r"\.\d\d$")
+
+
+def __face_pattern(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper, unused_nodes):
+    """Put the expression textures (eyes, mouth) of Kirby and the Forgotten Land characters on their face.
+
+    These are projected with the first UV map, which goes outside 0-1 around the face, so the rest of the
+    material's textures use the second one. Color frames are drawn over the base color using their alpha;
+    the shape masks some characters use instead (e.g. Waddle Dee's eyes) are colored by the game's shader,
+    so they're only given the right UV map.
+    """
+    patterns = [(name, node) for name, node in unused_nodes if PATTERN_FRAME.search(name)]
+    if not patterns:
+        return
+
+    tree = mat.node_tree
+    pattern_nodes = {node for _, node in patterns}
+    for node in list(tree.nodes):
+        if node.type == "TEX_IMAGE" and node not in pattern_nodes and node.image is not None:
+            if __slot_from_texture_name(node.image.name) is not None:
+                __set_uv_map(tree, node, "_u1")
+    for _, node in patterns:
+        node.extension = "CLIP"
+        __set_uv_map(tree, node, "_u0")
+
+    base_color = mat_wrap.node_principled_bsdf.inputs["Base Color"]
+    albedos = [
+        node
+        for name, node in patterns
+        if node.image.colorspace_settings.name == "sRGB"
+        and not name.rsplit(".", 1)[0].endswith(("Normal", "Mask"))  # e.g. DeeEyeNormal.00, DeeEyeMask.00
+    ]
+    if len(albedos) != 1 or not base_color.is_linked:
+        return
+    mix = tree.nodes.new(type="ShaderNodeMix")
+    mix.data_type = "RGBA"
+    mix.label = "Face Pattern"
+    mix.location = mathutils.Vector(mat_wrap._grid_to_location(0, 1))
+    tree.links.new(albedos[0].outputs["Alpha"], mix.inputs[0])
+    tree.links.new(base_color.links[0].from_socket, mix.inputs[6])
+    tree.links.new(albedos[0].outputs["Color"], mix.inputs[7])
+    tree.links.new(mix.outputs[2], base_color)
+
+
+def __second_layer(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper, unused_nodes):
+    """Blend in a second set of textures ("BaseColor2", "Normal2") where the vertex color's green is set.
+
+    Kirby and the Forgotten Land uses this for parts of a model drawn with other textures than the rest, like
+    Gigant Edge's fur collar, whose vertices have a green _c0 while the armor's are black.
+    """
+    layers = {}
+    for name, node in unused_nodes:
+        suffix = name.split(".", 1)[0].rsplit("_", 1)[-1]
+        if suffix in {"BaseColor2", "Normal2"}:
+            layers.setdefault(suffix, node)
+    if not layers:
+        return
+
+    tree = mat.node_tree
+    principled = mat_wrap.node_principled_bsdf
+    targets = {"BaseColor2": principled.inputs["Base Color"]}
+    normal_input = principled.inputs["Normal"]
+    if normal_input.is_linked and normal_input.links[0].from_node.type == "NORMAL_MAP":
+        targets["Normal2"] = normal_input.links[0].from_node.inputs["Color"]
+
+    mask = None
+    for suffix, node in layers.items():
+        target = targets.get(suffix)
+        if target is None or not target.is_linked:
+            continue
+        if mask is None:
+            color = tree.nodes.new(type="ShaderNodeVertexColor")
+            color.layer_name = "_c0"
+            color.location = principled.location.x - 900, principled.location.y + 300
+            mask = tree.nodes.new(type="ShaderNodeSeparateColor")
+            mask.label = "Second Layer Mask"
+            mask.location = color.location.x + 200, color.location.y
+            tree.links.new(color.outputs["Color"], mask.inputs["Color"])
+        mix = tree.nodes.new(type="ShaderNodeMix")
+        mix.data_type = "RGBA"
+        mix.label = f"Mix {suffix}"
+        mix.location = target.node.location.x - 200, target.node.location.y + 200
+        tree.links.new(mask.outputs[1], mix.inputs[0])
+        tree.links.new(target.links[0].from_socket, mix.inputs[6])
+        tree.links.new(node.outputs["Color"], mix.inputs[7])
+        tree.links.new(mix.outputs[2], target)
+
+
+def __set_uv_map(tree: bpy.types.NodeTree, tex_node: bpy.types.ShaderNodeTexImage, uv_map: str):
+    """Make an image texture node use a UV map, through its mapping node if it has one."""
+    target = tex_node.inputs["Vector"]
+    if target.is_linked and target.links[0].from_node.type == "MAPPING":
+        target = target.links[0].from_node.inputs["Vector"]
+    uv_node = tree.nodes.new(type="ShaderNodeUVMap")
+    uv_node.uv_map = uv_map
+    uv_node.location = target.node.location.x - 250, target.node.location.y
+    tree.links.new(uv_node.outputs["UV"], target)
+
+
+def __split_mra(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
+    """Split an "MRA" texture plugged into Metallic: metalness in red, roughness in green, AO in blue."""
+    principled = mat_wrap.node_principled_bsdf
+    metallic = principled.inputs["Metallic"]
+    if not metallic.is_linked:
+        return
+    image_node = metallic.links[0].from_node
+    if image_node.type != "TEX_IMAGE" or image_node.image is None:
+        return
+    if __slot_from_texture_name(image_node.image.name) != "_mra":
+        return
+
+    tree = mat.node_tree
+    separate = tree.nodes.new(type="ShaderNodeSeparateColor")
+    separate.label = "MRA"
+    separate.location = image_node.location.x + 300, image_node.location.y
+    tree.links.new(image_node.outputs["Color"], separate.inputs["Color"])
+    tree.links.new(separate.outputs[0], metallic)
+    roughness = principled.inputs["Roughness"]
+    if not roughness.is_linked:
+        tree.links.new(separate.outputs[1], roughness)
 
 
 def __split_packed_roughness(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper, wet_effect: bool):

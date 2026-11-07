@@ -26,6 +26,8 @@ class Importer:
         self.filename = self.filepath.name
         self.fileext = self.filepath.suffix.upper()
         self.texture_map = {}
+        # When set, only the textures with these names are imported from BNTX files.
+        self.texture_filter: set[str] | None = None
 
         # Files taken from a romfs dump need the dump's zstd dictionaries and shared strings.
         self.romfs_root = romfs.find_romfs_root(self.filepath)
@@ -44,7 +46,8 @@ class Importer:
     def _load_stream(self, raw) -> set:
         """Check if the stream is decompressed, and then check if it's an archive"""
         # Ensure to have a stream with decompressed data.
-        magic = raw.read(4)
+        head = raw.read(8)
+        magic = head[:4]
         raw.seek(0, io.SEEK_SET)
         match magic:
             # Uncompressed
@@ -57,12 +60,15 @@ class Importer:
                 r = self._get_from_sarc(raw)
                 return self._load_stream(r)
             # Compressed
-            case b"\x28\xb5\x2f\xfd":  # zstd
+            case romfs.ZSTD_MAGIC:
                 r = romfs.zstd_decompress(raw.read(), self.zstd_dicts)
                 return self._load_stream(io.BytesIO(r))
             case b"Yaz0":
                 r = yaz0.decompress(raw)
                 return self._load_stream(r)
+            # HAL's .cmp (Kirby and the Forgotten Land): the decompressed size, then a zstd frame
+            case _ if head[4:8] == romfs.ZSTD_MAGIC:
+                return self._load_stream(io.BytesIO(romfs.decompress_cmp(raw.read())))
             case _:
                 raise UnsupportedFileTypeError(magic)
 
@@ -75,6 +81,8 @@ class Importer:
         # Read and import any external files
         for node in bfres.external_files:
             self._import_embed(node, bfres.name)
+        if self.texture_filter is not None:
+            return {"FINISHED"}  # Only loaded for some of its textures, not its models
 
         self._import_linked_textures(bfres)
 
@@ -136,6 +144,9 @@ class Importer:
                 log.info("Importing linked file: %s", texpath)
                 self.run_file(texpath)
 
+        if mode == "AUTO":
+            self._import_shared_texture_files(bfres)
+
         if mode not in {"AUTO", "TEX_FOLDER"}:
             return
         missing = self._missing_textures(bfres)
@@ -180,6 +191,25 @@ class Importer:
                 + ", ".join(failed),
             )
 
+    def _import_shared_texture_files(self, bfres: ResFile):
+        """Import the textures a model uses from shared texture files (Kirby and the Forgotten Land).
+
+        Only the textures the model is missing are imported, since these files are shared by many models.
+        """
+        missing = self._missing_textures(bfres)
+        if not missing:
+            return
+        try:
+            for path, names in romfs.find_shared_texture_files(self.filepath, missing).items():
+                self.texture_filter = names
+                log.info("Importing %d texture(s) from: %s", len(names), path)
+                try:
+                    self.run_file(path)
+                except Exception:
+                    log.exception("Failed to import texture file: %s", path)
+        finally:
+            self.texture_filter = None
+
     def _missing_textures(self, bfres: ResFile) -> set[str]:
         """Return the texture names the materials use that haven't been imported yet.
 
@@ -206,7 +236,7 @@ class Importer:
 
         bntx_ = bntx.BNTX(stream)
 
-        self.texture_map.update(import_textures(bntx_, self.operator))
+        self.texture_map.update(import_textures(bntx_, self.operator, self.texture_filter))
 
         return {"FINISHED"}
 

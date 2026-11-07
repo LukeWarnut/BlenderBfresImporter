@@ -22,6 +22,8 @@ Newer games (e.g. Tears of the Kingdom, Ocarina of Time on Switch 2) keep textur
 
 Games that don't have these files, like Splatoon Raiders, work the same way. Texture files named after the model (e.g. `Tex/Npc_Foo.M_Body_Alb.bntx.zs` for `Model/Npc_Foo.Npc_Foo.bfres.zs`) are found too.
 
+Kirby and the Forgotten Land's `.bfres.cmp` files can be imported directly. Most models embed their textures. Stage models that don't, with "Texture Import Mode" set to "Automatic", get them from the `Tex_<hash>.bfres.cmp` files next to them and from the shared files in `gfx/Step/Decor/Motif`. Only the textures the model uses are imported from those.
+
 Textures that already exist in the blend file with the same name are reused instead of being imported again.
 
 ### Material Data

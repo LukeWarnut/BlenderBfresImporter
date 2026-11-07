@@ -44,7 +44,7 @@ class ImportBFRES(bpy.types.Operator, ImportHelper):
     )
 
     filter_glob: StringProperty(
-        default="*.sbfres;*.bfres;*.fres;*.szs;*.zs",
+        default="*.sbfres;*.bfres;*.fres;*.szs;*.zs;*.cmp",
         options={"HIDDEN"},
     )
 
@@ -208,7 +208,7 @@ def import_panel_misc(layout, operator):
 
 def menu_func_import(self, context):
     self.layout.operator_context = "INVOKE_DEFAULT"
-    self.layout.operator(ImportBFRES.bl_idname, text="Nintendo Switch BFRES (.bfres/.szs/.zs)")
+    self.layout.operator(ImportBFRES.bl_idname, text="Nintendo Switch BFRES (.bfres/.szs/.zs/.cmp)")
 
 
 # def menu_func_export(self, context):

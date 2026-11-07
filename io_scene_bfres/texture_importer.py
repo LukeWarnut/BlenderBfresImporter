@@ -12,10 +12,12 @@ if TYPE_CHECKING:
     from .bntx.bntx import BNTX
 
 
-def import_textures(bntx: BNTX, operator):
-    """Import textures from BNTX."""
+def import_textures(bntx: BNTX, operator, only: set[str] | None = None):
+    """Import textures from BNTX, or only the ones named in ``only``."""
     images = {}
     for i, tex in enumerate(bntx.nx.textures):
+        if only is not None and tex.name not in only:
+            continue
         log.info(
             "Importing texture %3d/%3d '%s' (%s, %s)...",
             i + 1,

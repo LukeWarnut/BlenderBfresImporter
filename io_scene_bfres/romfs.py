@@ -26,9 +26,13 @@ log = logging.getLogger(__name__)
 ZSDIC_PACK = Path("Pack", "ZsDic.pack.zs")
 EXTERNAL_STRING_FILE = Path("Shader", "ExternalBinaryString.bfres.zs")
 TEX_DIR = "Tex"
+MOTIF_DIR = Path("Step", "Decor", "Motif")
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
 # Dictionaries are the same for every file in a dump, so keep them between imports.
 _dict_cache: dict[Path, dict[int, zstandard.ZstdCompressionDict]] = {}
+# Texture files by texture name, for each folder that was searched.
+_texture_index_cache: dict[tuple[Path, bool], dict[str, Path]] = {}
 
 
 def find_romfs_root(path: str | Path) -> Path | None:
@@ -95,6 +99,68 @@ def zstd_decompress(data: bytes, dicts: dict[int, zstandard.ZstdCompressionDict]
             )
             raise MalformedFileError(msg)
     return zstandard.ZstdDecompressor(dict_data=zdict).decompressobj().decompress(data)
+
+
+def decompress_cmp(data: bytes) -> bytes | None:
+    """Decompress a HAL ``.cmp`` file: the decompressed size, then a zstd frame. None if it isn't one."""
+    if data[4:8] != ZSTD_MAGIC:
+        return None
+    return zstandard.ZstdDecompressor().decompressobj().decompress(data[4:])
+
+
+def bntx_texture_names(data: bytes) -> set[str]:
+    """Return the names in the BNTX files inside ``data``, read from their string tables without decoding them."""
+    names = set()
+    start = data.find(b"BNTX\0\0\0\0")
+    while start >= 0:
+        table = data.find(b"_STR", start)
+        if data[start + 0x20 : start + 0x24] == b"NX  " and table >= 0:
+            (count,) = struct.unpack_from("<I", data, table + 0x10)
+            pos = table + 0x18
+            for _ in range(count):
+                (length,) = struct.unpack_from("<H", data, pos)
+                names.add(data[pos + 2 : pos + 2 + length].decode("utf-8", "replace"))
+                pos = (pos + 2 + length + 2) & ~1  # length, string and its null, aligned to 2
+        start = data.find(b"BNTX\0\0\0\0", start + 4)
+    return names
+
+
+def find_shared_texture_files(model_path: Path, names: set[str]) -> dict[Path, set[str]]:
+    """Return the files that hold the given textures, for models that don't embed them.
+
+    Kirby and the Forgotten Land's stage models use textures kept in other files: ``Tex_<hash>.bfres.cmp``
+    next to them, and the material libraries in ``gfx/Step/Decor/Motif`` (e.g. ``Grass/Land/GsDefault/Main.bfres.cmp``
+    or ``AutoDecor/Land/Grass/<texture>/Tex.bfres.cmp``). The model's folder is searched first, then Motif.
+    """
+    indexes = [_texture_index(model_path.parent, recursive=False)]
+    for parent in model_path.resolve().parents:
+        if (parent / MOTIF_DIR).is_dir():
+            indexes.append(_texture_index(parent / MOTIF_DIR, recursive=True))
+            break
+
+    files: dict[Path, set[str]] = {}
+    for name in sorted(names):
+        path = next((index[name] for index in indexes if name in index), None)
+        if path is not None and path.resolve() != model_path.resolve():
+            files.setdefault(path, set()).add(name)
+    return files
+
+
+def _texture_index(folder: Path, recursive: bool) -> dict[str, Path]:
+    """Return the ``.cmp`` file each texture in a folder is in, by texture name."""
+    key = (folder.resolve(), recursive)
+    if key not in _texture_index_cache:
+        log.info("Indexing textures in: %s", folder)
+        index = {}
+        for path in sorted(folder.glob("**/*.cmp" if recursive else "*.cmp")):
+            try:
+                data = decompress_cmp(path.read_bytes())
+                for name in bntx_texture_names(data) if data else ():
+                    index.setdefault(name, path)
+            except Exception:
+                log.debug("Couldn't read textures in: %s", path, exc_info=True)
+        _texture_index_cache[key] = index
+    return _texture_index_cache[key]
 
 
 def find_texture_file(tex_dir: Path, name: str, prefixes: tuple[str, ...] = ()) -> Path | None:

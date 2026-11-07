@@ -21,4 +21,5 @@ class ExternalFile(core.ResData):
     def load(self, loader: core.ResFileLoader):
         offs_data = loader.read_offset()
         siz_data = loader.read_size()
+        loader.seek(4)  # padding, entries are 16 bytes
         self.data = loader.load_custom(bytes, lambda: loader.read_bytes(siz_data), offset=offs_data)
