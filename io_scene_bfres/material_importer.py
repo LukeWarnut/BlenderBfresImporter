@@ -3,6 +3,7 @@ import re
 
 import bpy
 import mathutils
+import numpy as np
 from bpy_extras.node_shader_utils import PrincipledBSDFWrapper, ShaderImageTextureWrapper
 
 from .bfrespy.common import ResString
@@ -474,6 +475,16 @@ def __setup_alpha(
     blend_mode = __render_info(fmat, "gsys_render_state_blend_mode")
     alpha_test = mode == "mask" or __render_info(fmat, "gsys_alpha_test_enable") == "true"
     translucent = mode == "translucent" or (mode == "custom" and blend_mode not in {None, "none"})
+    rgb_src = __render_info(fmat, "gsys_color_blend_rgb_src_func")
+    rgb_dst = __render_info(fmat, "gsys_color_blend_rgb_dst_func")
+    render_pass = __render_info(fmat, "renderPass")
+    if render_pass is not None:
+        # Kirby and the Forgotten Land. Its alpha test is part of each material's shader, so cutouts are
+        # found from the meshes later instead (see apply_texture_cutout).
+        translucent = render_pass == "xlu" or __render_info(fmat, "blendEnabled") == 1
+        blend_factors = {"one": "one", "sourceAlpha": "src_alpha"}
+        rgb_src = blend_factors.get(__render_info(fmat, "sourceColorBlendFactor"))
+        rgb_dst = blend_factors.get(__render_info(fmat, "destinationColorBlendFactor"))
     if not (alpha_test or translucent):
         return
 
@@ -485,8 +496,6 @@ def __setup_alpha(
     legacy = not hasattr(mat, "surface_render_method")  # Blender < 4.2
 
     # Additive blending (e.g. fake eye highlights): only light gets added on top of what's behind.
-    rgb_src = __render_info(fmat, "gsys_color_blend_rgb_src_func")
-    rgb_dst = __render_info(fmat, "gsys_color_blend_rgb_dst_func")
     if translucent and rgb_dst == "one" and rgb_src in {"one", "src_alpha"}:
         emission_input = principled.inputs.get("Emission Color") or principled.inputs.get("Emission")
         for color_input in (emission_input, principled.inputs["Base Color"]):
@@ -516,8 +525,7 @@ def __setup_alpha(
     __apply_alpha_select(fmat, mat, principled)
     if not alpha_input.is_linked:
         # Take the alpha from the image plugged into Base Color, if it has one.
-        base_links = principled.inputs["Base Color"].links
-        image_node = base_links[0].from_node if base_links else None
+        image_node = __base_color_image_node(principled)
         if image_node is None and missing_albedo:
             # The albedo holds the cutout mask (e.g. eyebrow cards), so without it there's nothing to show.
             # Some games reference textures that aren't in the dump; hide the surface instead of drawing
@@ -550,21 +558,98 @@ def __setup_alpha(
             mat.shadow_method = "HASHED"
         else:
             mat.surface_render_method = "BLENDED"
-    elif legacy:
+    else:
+        __make_alpha_test(mat, principled, threshold)
+
+
+def __make_alpha_test(mat: bpy.types.Material, principled, threshold: float):
+    """Make the alpha plugged into the Principled BSDF a hard cutout."""
+    if not hasattr(mat, "surface_render_method"):  # Blender < 4.2
         mat.blend_method = "CLIP"
         mat.shadow_method = "CLIP"
         mat.alpha_threshold = threshold
-    else:
-        # EEVEE Next has no alpha clip mode, so make the cutout hard with a math node like the game does.
-        source = alpha_input.links[0].from_socket
-        clip = tree.nodes.new(type="ShaderNodeMath")
-        clip.operation = "GREATER_THAN"
-        clip.label = "Alpha Test"
-        clip.inputs[1].default_value = threshold
-        clip.location = principled.location.x - 200, principled.location.y - 400
-        tree.links.new(source, clip.inputs[0])
-        tree.links.new(clip.outputs["Value"], alpha_input)
-        mat.surface_render_method = "DITHERED"
+        return
+    # EEVEE Next has no alpha clip mode, so make the cutout hard with a math node like the game does.
+    tree = mat.node_tree
+    alpha_input = principled.inputs["Alpha"]
+    source = alpha_input.links[0].from_socket
+    clip = tree.nodes.new(type="ShaderNodeMath")
+    clip.operation = "GREATER_THAN"
+    clip.label = "Alpha Test"
+    clip.inputs[1].default_value = threshold
+    clip.location = principled.location.x - 200, principled.location.y - 400
+    tree.links.new(source, clip.inputs[0])
+    tree.links.new(clip.outputs["Value"], alpha_input)
+    mat.surface_render_method = "DITHERED"
+
+
+# Mix nodes added on top of the base color texture, by label, and which input the base color is in.
+BASE_COLOR_MIX_INPUTS = {"Face Pattern": 6, "Mix BaseColor2": 6}
+
+
+def __base_color_image_node(principled):
+    """Return the node plugged into Base Color, looking through the layers mixed on top of a texture."""
+    links = principled.inputs["Base Color"].links
+    node = links[0].from_node if links else None
+    while node is not None and node.type == "MIX" and node.label in BASE_COLOR_MIX_INPUTS:
+        links = node.inputs[BASE_COLOR_MIX_INPUTS[node.label]].links
+        node = links[0].from_node if links else None
+    return node
+
+
+def apply_texture_cutout(mat: bpy.types.Material, objects):
+    """Alpha test opaque Kirby and the Forgotten Land materials whose base color alpha is a cutout.
+
+    The game's alpha test is compiled into each material's shader, and many base colors store other data
+    in their alpha (e.g. masks that are 0 over most of the model), so this looks at the meshes: if some of
+    their faces, but not most, sit on transparent texels (like the fur cards of the rabbit enemy's tail),
+    the alpha is a cutout.
+    """
+    if mat.get("RI_renderPass") != "opa" or mat.get("RI_blendEnabled", 0) != 0:
+        return
+    principled = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if principled is None or principled.inputs["Alpha"].is_linked:
+        return
+    image_node = __base_color_image_node(principled)
+    if image_node is None or image_node.type != "TEX_IMAGE" or image_node.image is None:
+        return
+    image = image_node.image
+    width, height = image.size
+    if image.channels < 4 or width == 0 or height == 0:
+        return
+    alpha = np.empty(width * height * 4, dtype=np.float32)
+    image.pixels.foreach_get(alpha)
+    alpha = alpha[3::4].reshape(height, width)
+    if alpha.min() >= 0.5:
+        return
+
+    vector = image_node.inputs["Vector"]
+    uv_node = vector.links[0].from_node if vector.is_linked else None
+    uv_name = uv_node.uv_map if uv_node is not None and uv_node.type == "UVMAP" else None
+    transparent = total = 0
+    for obj in objects:
+        mesh = obj.data
+        uv_layer = mesh.uv_layers.get(uv_name) if uv_name else mesh.uv_layers.active
+        if uv_layer is None or not mesh.polygons:
+            continue
+        uvs = np.empty(len(mesh.loops) * 2, dtype=np.float32)
+        uv_layer.data.foreach_get("uv", uvs)
+        uvs = uvs.reshape(-1, 2)
+        starts = np.empty(len(mesh.polygons), dtype=np.int32)
+        counts = np.empty(len(mesh.polygons), dtype=np.int32)
+        mesh.polygons.foreach_get("loop_start", starts)
+        mesh.polygons.foreach_get("loop_total", counts)
+        centers = np.add.reduceat(uvs, starts) / counts[:, None]  # loops of a face are contiguous
+        x = (np.mod(centers[:, 0], 1.0) * width).astype(np.int32).clip(0, width - 1)
+        y = (np.mod(centers[:, 1], 1.0) * height).astype(np.int32).clip(0, height - 1)
+        transparent += int((alpha[y, x] < 0.5).sum())
+        total += len(centers)
+    if total == 0 or not 0.005 < transparent / total < 0.5:
+        return
+
+    log.info("Alpha testing material '%s' (%d of %d faces are cut out)", mat.name, transparent, total)
+    mat.node_tree.links.new(image_node.outputs["Alpha"], principled.inputs["Alpha"])
+    __make_alpha_test(mat, principled, 0.5)
 
 
 def set_uv_coords(mat: bpy.types.Material, sampler: str, tex_node: bpy.types.ShaderNodeTexImage):
