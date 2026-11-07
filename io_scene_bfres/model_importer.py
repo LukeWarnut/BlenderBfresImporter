@@ -31,6 +31,10 @@ class ModelImporter:
         # Go through the polygons in this model and create mesh objects representing them.
         for i, fshp in enumerate(fmdl.shapes.values()):
             log.info("Importing shape %3d / %3d '%s'...", i + 1, len(fmdl.shapes), fshp.name)
+            # Some games keep placeholder shapes without any geometry (no meshes, empty vertex buffer).
+            if not fshp.meshes:
+                log.warning("Skipping shape '%s': it has no meshes", fshp.name)
+                continue
             mesh_object = import_mesh(fmdl, fshp, self.operator.lod_index, self.operator.custom_normals)
             mesh_object.data.materials.append(material_map[fshp.material_idx])
 
