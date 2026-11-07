@@ -149,10 +149,14 @@ class Importer:
             log.info("No Tex folder found at: %s", texfolder)
             return
 
+        # Texture files may be prefixed with the model's name, e.g. "Npc_Foo.M_Body_Alb.bntx.zs" for
+        # "Model/Npc_Foo.Npc_Foo.bfres.zs".
+        prefixes = tuple(dict.fromkeys(p for p in (self.filename.split(".")[0], bfres.name) if p))
+
         not_found = []
         failed = []
         for i, name in enumerate(sorted(missing)):
-            texpath = romfs.find_texture_file(texfolder, name)
+            texpath = romfs.find_texture_file(texfolder, name, prefixes)
             if texpath is None:
                 log.warning("Texture file not found in Tex folder: %s", name)
                 not_found.append(name)

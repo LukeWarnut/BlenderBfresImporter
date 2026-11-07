@@ -97,10 +97,15 @@ def zstd_decompress(data: bytes, dicts: dict[int, zstandard.ZstdCompressionDict]
     return zstandard.ZstdDecompressor(dict_data=zdict).decompressobj().decompress(data)
 
 
-def find_texture_file(tex_dir: Path, name: str) -> Path | None:
-    """Return the BNTX file for a texture name in a Tex folder, if there is one."""
-    for suffix in (".bntx.zs", ".bntx", ".bntx.szs"):
-        path = tex_dir / (name + suffix)
-        if path.is_file():
-            return path
+def find_texture_file(tex_dir: Path, name: str, prefixes: tuple[str, ...] = ()) -> Path | None:
+    """Return the BNTX file for a texture name in a Tex folder, if there is one.
+
+    Some games (e.g. Splatoon Raiders) prefix each texture file with the name of the model that
+    uses it (``Tex/<model>.<texture>.bntx.zs``), so those prefixes are tried after the bare name.
+    """
+    for stem in (name, *(f"{prefix}.{name}" for prefix in prefixes)):
+        for suffix in (".bntx.zs", ".bntx", ".bntx.szs"):
+            path = tex_dir / (stem + suffix)
+            if path.is_file():
+                return path
     return None

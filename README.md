@@ -20,6 +20,8 @@ Blender handles skeletal animations very differently and it may not be possible 
 
 Newer games (e.g. Tears of the Kingdom, Ocarina of Time on Switch 2) keep textures, zstd dictionaries and some strings outside the model file. Import the `.bfres.zs` straight from the dump's `romfs/Model` folder and, with "Texture Import Mode" set to "Automatic", the addon will find `Pack/ZsDic.pack.zs`, `Shader/ExternalBinaryString.bfres.zs` and the textures in `romfs/Tex` by itself.
 
+Games that don't have these files, like Splatoon Raiders, work the same way. Texture files named after the model (e.g. `Tex/Npc_Foo.M_Body_Alb.bntx.zs` for `Model/Npc_Foo.Npc_Foo.bfres.zs`) are found too.
+
 Textures that already exist in the blend file with the same name are reused instead of being imported again.
 
 ### Material Data
