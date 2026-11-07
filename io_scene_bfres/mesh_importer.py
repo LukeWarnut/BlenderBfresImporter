@@ -70,7 +70,7 @@ def import_mesh(fmdl, fshp, lod_idx, custom_normals) -> bpy.types.Object:
     add_uv_maps(mesh_ob, lod_vtx_attribs)
     add_vtx_weights(mesh_ob, fmdl, fshp, lod_vtx_attribs)
 
-    if custom_normals:
+    if custom_normals and "_n0" in lod_vtx_attribs:
         add_split_normals(mesh_ob, lod_vtx_attribs, fshp, fmdl)
     if "_c0" in lod_vtx_attribs:
         add_vtx_colors(mesh_ob, lod_vtx_attribs["_c0"])

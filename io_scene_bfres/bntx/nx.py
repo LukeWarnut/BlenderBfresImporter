@@ -15,6 +15,9 @@ class NX(core.ResData):
 
     def load(self, loader: core.ResFileLoader):
         target_platform = loader.read_raw_string(4, "ascii")
+        # "NX  " for Switch, "Ounc" for Switch 2. The BRTIs need it to deswizzle their data.
+        self.target_platform = target_platform
+        loader.texture_platform = target_platform
         tex_count = loader.read_int32()
         tex_table_array = loader.read_offset()
         tex_data_ptr = loader.read_uint64()

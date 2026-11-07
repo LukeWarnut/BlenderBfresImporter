@@ -196,7 +196,8 @@ class BC6(TextureFormat):
 
     col_to_int = {"r": 0, "g": 1, "b": 2}
 
-    def decompress(self, tex: BRTI):
+    @staticmethod
+    def decompress(tex: BRTI):
         data = tex.mip_data
         width = tex.width
         height = tex.height
@@ -207,7 +208,7 @@ class BC6(TextureFormat):
             return b""
 
         data = data[:csize]
-        return self.decomp_bc6(data, width, height, signed)
+        return BC6.decomp_bc6(data, width, height, signed)
 
     @staticmethod
     def decomp_bc6(data, width, height, signed: bool):
@@ -417,7 +418,8 @@ class BC7(TextureFormat):
 
     _FORMAT_ID = 0x20
 
-    def decompress(self, tex):
+    @staticmethod
+    def decompress(tex):
         data = tex.mip_data
         width = tex.width
         height = tex.height
@@ -426,8 +428,16 @@ class BC7(TextureFormat):
             log.warning("Compressed data is incomplete")
             return b""
 
-        data = data[:csize]
-        return self.decomp_bc7(data, width, height)
+        data = bytes(data[:csize])
+        try:
+            from texture2ddecoder import decode_bc7
+        except ImportError:
+            # The pure Python decoder works, but is very slow on large textures.
+            return BC7.decomp_bc7(data, width, height)
+
+        # texture2ddecoder outputs BGRA, swap it back to RGBA.
+        pixels = np.frombuffer(decode_bc7(data, width, height), dtype=np.uint8).reshape((-1, 4))
+        return pixels[:, [2, 1, 0, 3]].tobytes()
 
     @staticmethod
     def decomp_bc7(data, width, height):

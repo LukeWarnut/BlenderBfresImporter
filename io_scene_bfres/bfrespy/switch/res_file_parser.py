@@ -64,8 +64,9 @@ class ResFileParser:
 
                 with loader.temporary_seek(external_file_offset, io.SEEK_SET):
                     common.stringcache.clear()
-                    for string in external_file_dict:
-                        string_id = loader.read_int64()
+                    for string in external_file_dict.keys():
+                        # String references are read as unsigned offsets, so key the cache the same way.
+                        string_id = loader.read_uint64()
                         common.stringcache[string_id] = string
                 return
 

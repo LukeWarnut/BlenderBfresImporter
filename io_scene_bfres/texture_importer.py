@@ -72,6 +72,13 @@ def import_textures(bntx: BNTX, operator):
                     case 5:
                         pixels[..., ch] = temppix[..., 3]
 
+            # Two channel normal maps (e.g. ASTC with an R, A, 0, 1 selector) only store X and Y.
+            # Rebuild Z so they work with Blender's Normal Map node.
+            if isdata and not float_buffer and tex.channel_types[2] == 0 and tex.channel_types[3] == 1:
+                nx = pixels[..., 0] * 2 - 1
+                ny = pixels[..., 1] * 2 - 1
+                pixels[..., 2] = np.sqrt(np.clip(1 - nx * nx - ny * ny, 0, 1)) * 0.5 + 0.5
+
         # Add some file data if it's needed:
         if tex.fmt_dtype.name in {"UHALF", "SINGLE"}:
             image.file_format = "OPEN_EXR"
@@ -82,7 +89,7 @@ def import_textures(bntx: BNTX, operator):
         # flip image from dx to gl
         pixels = np.flipud(pixels)
 
-        image.pixels = np.ravel(pixels)
+        image.pixels.foreach_set(np.ravel(pixels).astype(np.float32))
 
         image.use_fake_user = operator.add_fake_user
 

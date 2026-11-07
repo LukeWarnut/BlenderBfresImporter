@@ -121,6 +121,7 @@ class BRTI(core.ResData):
             self.tile_mode,
             max(0, self.blk_height_log2 - blk_height_shift),
             self.data,
+            switch2_gob=getattr(loader, "texture_platform", "NX  ") == "Ounc",
         )
 
         self.mip_data = result[:size]

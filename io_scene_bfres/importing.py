@@ -4,9 +4,9 @@ import struct
 from pathlib import Path
 
 import bpy
-import zstandard
 
-from . import yaz0
+from . import romfs, yaz0
+from .bfrespy import common
 from .bfrespy.res_file import ResFile
 from .bone_anim_importer import BoneAnimationImporter
 from .exceptions import MalformedFileError, UnsupportedFileTypeError
@@ -26,7 +26,12 @@ class Importer:
         self.filename = self.filepath.name
         self.fileext = self.filepath.suffix.upper()
         self.texture_map = {}
-        # Create work directories for temporary files.
+
+        # Files taken from a romfs dump need the dump's zstd dictionaries and shared strings.
+        self.romfs_root = romfs.find_romfs_root(self.filepath)
+        self.zstd_dicts = romfs.load_zstd_dicts(self.romfs_root)
+        if self.romfs_root:
+            log.info("Found romfs dump at: %s", self.romfs_root)
 
     def run(self):
         with open(self.filepath, "rb") as f:
@@ -53,8 +58,7 @@ class Importer:
                 return self._load_stream(r)
             # Compressed
             case b"\x28\xb5\x2f\xfd":  # zstd
-                dctx = zstandard.ZstdDecompressor()
-                r = dctx.decompress(raw.read())
+                r = romfs.zstd_decompress(raw.read(), self.zstd_dicts)
                 return self._load_stream(io.BytesIO(r))
             case b"Yaz0":
                 r = yaz0.decompress(raw)
@@ -64,6 +68,7 @@ class Importer:
 
     def _import_bfres(self, stream):
         """Import a BFRES file, and return 'FINISHED' if it succeeds"""
+        self._load_external_strings(stream)
         bfres = ResFile(stream)
         self.bfres = bfres
 
@@ -71,25 +76,7 @@ class Importer:
         for node in bfres.external_files:
             self._import_embed(node, bfres.name)
 
-        if self.operator.import_tex_mode == "TEX_FILE":
-            texpath = Path(self.filepath).stem
-            ext = Path(self.filepath).suffix
-            texpath = texpath + ".Tex" + ext
-            if Path(texpath).is_file():
-                log.info("Importing linked file: %s", texpath)
-                self.run_file(texpath)
-
-        if self.operator.import_tex_mode == "TEX_FOLDER":
-            texfolder = Path(self.filepath).parents[1].joinpath("Tex")
-            ext = Path(self.filepath).suffix
-            for model in bfres.models.values():
-                for fmat in model.materials.values():
-                    for tex in fmat.texture_refs:
-                        texpath = texfolder.joinpath(tex.name).with_suffix(".bntx" + ext)
-                        log.debug("Looking for: %s", texpath)
-                        if texpath.is_file():
-                            log.info("Importing file from Tex folder: %s", texpath)
-                            self.run_file(texpath)
+        self._import_linked_textures(bfres)
 
         if self.operator.import_anims:
             anim_imp = BoneAnimationImporter(self)
@@ -107,6 +94,97 @@ class Importer:
             model_imp.convert_fmdl(fmdl, collection)
 
         return {"FINISHED"}
+
+    # The file the global string cache was last filled from.
+    _external_strings_source: Path | None = None
+
+    def _load_external_strings(self, stream):
+        """Load the shared string file if this bfres refers to strings stored outside of it."""
+        stream.seek(0, io.SEEK_SET)
+        header = stream.read(0xF0)
+        stream.seek(0, io.SEEK_SET)
+        if len(header) < 0xF0 or header[4:8] != b"    " or header[0x0A] < 10:
+            return  # Not a v10+ Switch bfres, so there are no external flags
+        if not header[0xEE] & ResFile.ExternalFlags.HAS_EXTERNAL_STRING:
+            return
+
+        if self.romfs_root is None:
+            msg = (
+                "This bfres keeps its strings in "
+                f"{romfs.EXTERNAL_STRING_FILE.as_posix()}. Import it from inside a romfs dump."
+            )
+            raise MalformedFileError(msg)
+
+        string_file = self.romfs_root / romfs.EXTERNAL_STRING_FILE
+        if Importer._external_strings_source == string_file and common.stringcache:
+            return
+        log.info("Loading external strings from: %s", string_file)
+        with open(string_file, "rb") as f:
+            data = romfs.zstd_decompress(f.read(), self.zstd_dicts)
+        ResFile(io.BytesIO(data))  # Fills common.stringcache
+        Importer._external_strings_source = string_file
+
+    def _import_linked_textures(self, bfres: ResFile):
+        """Import textures that live in files next to the bfres instead of inside it."""
+        mode = self.operator.import_tex_mode
+        if mode == "EMBEDDED":
+            return
+
+        if mode in {"AUTO", "TEX_FILE"} and self._missing_textures(bfres):
+            texpath = self.directory / (self.filepath.stem + ".Tex" + self.filepath.suffix)
+            if texpath.is_file():
+                log.info("Importing linked file: %s", texpath)
+                self.run_file(texpath)
+
+        if mode not in {"AUTO", "TEX_FOLDER"}:
+            return
+        missing = self._missing_textures(bfres)
+        if not missing:
+            return
+        if self.romfs_root:
+            texfolder = self.romfs_root / romfs.TEX_DIR
+        else:
+            texfolder = self.filepath.parents[1] / romfs.TEX_DIR
+        if not texfolder.is_dir():
+            log.info("No Tex folder found at: %s", texfolder)
+            return
+
+        failed = []
+        for i, name in enumerate(sorted(missing)):
+            texpath = romfs.find_texture_file(texfolder, name)
+            if texpath is None:
+                log.warning("Texture file not found in Tex folder: %s", name)
+                failed.append(name)
+                continue
+            log.info("Importing texture file %3d/%3d: %s", i + 1, len(missing), texpath.name)
+            try:
+                self.run_file(texpath)
+            except Exception:
+                log.exception("Failed to import texture file: %s", texpath)
+                failed.append(name)
+        if failed:
+            self.operator.report(
+                {"WARNING"}, f"{len(failed)} texture(s) could not be imported, see the console for details"
+            )
+
+    def _missing_textures(self, bfres: ResFile) -> set[str]:
+        """Return the texture names the materials use that haven't been imported yet.
+
+        Images that already exist in the blend file (e.g. shared textures from an earlier import) are reused.
+        """
+        prefix = self.operator.name_prefix
+        missing = set()
+        for model in bfres.models.values():
+            for fmat in model.materials.values():
+                for tex in fmat.texture_refs:
+                    if tex.name in self.texture_map:
+                        continue
+                    image = bpy.data.images.get(prefix + tex.name)
+                    if image is not None:
+                        self.texture_map[tex.name] = image
+                    else:
+                        missing.add(tex.name)
+        return missing
 
     def _import_bntx(self, stream):
         """Import a bntx file, and return 'FINISHED' if it succeeds"""

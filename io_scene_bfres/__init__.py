@@ -57,12 +57,18 @@ class ImportBFRES(bpy.types.Operator, ImportHelper):
     import_tex_mode: EnumProperty(
         name="Texture Import Mode",
         items = (
+            (
+                "AUTO",
+                "Automatic",
+                "Import embedded textures, then look for missing ones in a .Tex file and in the Tex folder "
+                "(of the romfs dump, if the model is inside one).",
+            ),
             ("EMBEDDED", "Embedded", "Import textures embedded in the model file."),
             ("TEX_FILE", ".Tex File", "Imports from a .tex file in the same directory"),
             ("TEX_FOLDER", "Tex Folder", "Imports from a tex folder in the parent directory"),
             ),
         description="How should textures be imported, different depending on the game.",
-        default="EMBEDDED",
+        default="AUTO",
     )
 
     copy_bone_transforms: BoolProperty(

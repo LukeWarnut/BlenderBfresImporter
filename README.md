@@ -16,6 +16,12 @@ Blender handles skeletal animations very differently and it may not be possible 
 
 ## Tips
 
+### Importing from a romfs dump
+
+Newer games (e.g. Tears of the Kingdom, Ocarina of Time on Switch 2) keep textures, zstd dictionaries and some strings outside the model file. Import the `.bfres.zs` straight from the dump's `romfs/Model` folder and, with "Texture Import Mode" set to "Automatic", the addon will find `Pack/ZsDic.pack.zs`, `Shader/ExternalBinaryString.bfres.zs` and the textures in `romfs/Tex` by itself.
+
+Textures that already exist in the blend file with the same name are reused instead of being imported again.
+
 ### Material Data
 
 This addon imports the material parameters, shader options and render info of the bfres material into the "Custom Properties" of the Blender material.

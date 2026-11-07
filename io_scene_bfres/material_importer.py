@@ -40,10 +40,9 @@ def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Mate
     __add_custom_properties(fmat, mat)
 
     mappingnode = None
-    i = 0
-    # TODO: debug to see why removing tex_sampler breaks this
-    for sampler, tex_sampler in fmat.samplers.items():
-        tex_name = fmat.texture_refs[i].name
+    # Samplers and texture references are parallel lists.
+    for sampler, tex_ref in zip(fmat.samplers.keys(), fmat.texture_refs):
+        tex_name = tex_ref.name
         if tex_name in texture_dict:
             image = texture_dict[tex_name]
         else:
@@ -54,7 +53,6 @@ def import_material(fmat: Material, texture_dict, name_prefix) -> bpy.types.Mate
             continue
 
         tex_sampler_name = fmat.shader_assign.sampler_assigns.key_from_value(ResString(sampler))
-        i += 1
 
         # Get the bpy Texture Wrapper from the sampler name
         tex_helper_name = TEX_WRAPPER.get(tex_sampler_name)
