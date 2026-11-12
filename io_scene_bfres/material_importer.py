@@ -152,6 +152,7 @@ def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False,
     __setup_alpha(fmat, mat, mat_wrap, missing_albedo, report)
     __outline(fmat, mat, mat_wrap)
     __apply_known_graphs(mat, mat_wrap)
+    __hide_if_no_color_written(fmat, mat, mat_wrap)
 
     return mat
 
@@ -472,6 +473,27 @@ def __layer_masked_albedo(mat, mat_wrap: PrincipledBSDFWrapper, unused_nodes):
     tree.links.new(extra_albedos[0].outputs["Color"], mix.inputs[6])
     tree.links.new(base_links[0].from_socket, mix.inputs[7])
     tree.links.new(mix.outputs[2], mat_wrap.node_principled_bsdf.inputs["Base Color"])
+
+
+def __hide_if_no_color_written(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
+    """Hide materials that don't draw any color.
+
+    HAL's games (Kirby) turn off every color channel for some materials, e.g. the stencil masks around Whispy
+    Woods' eyes and the old flat leaf cards left behind his newer leaves, so they never show up in the game.
+    """
+    if __render_info(fmat, "channelMask") != "zero":
+        return
+    log.info("Hiding material '%s': it doesn't write any color", mat.name)
+    principled = mat_wrap.node_principled_bsdf
+    alpha_input = principled.inputs["Alpha"]
+    for link in list(alpha_input.links):
+        mat.node_tree.links.remove(link)
+    alpha_input.default_value = 0.0
+    if hasattr(mat, "surface_render_method"):
+        mat.surface_render_method = "DITHERED"
+    else:  # Blender < 4.2
+        mat.blend_method = "CLIP"
+        mat.shadow_method = "NONE"
 
 
 def __render_info(fmat: Material, name: str):
