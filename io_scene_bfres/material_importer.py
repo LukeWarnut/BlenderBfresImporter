@@ -148,6 +148,7 @@ def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False,
     # Alpha first: it takes the alpha from the image plugged into Base Color, which the graphs replace.
     missing_albedo = any(__slot_from_texture_name(name) == "_a0" for name in missing_textures)
     __setup_alpha(fmat, mat, mat_wrap, missing_albedo, report)
+    __outline(fmat, mat, mat_wrap)
     __apply_known_graphs(mat, mat_wrap)
 
     return mat
@@ -560,6 +561,68 @@ def __setup_alpha(
             mat.surface_render_method = "BLENDED"
     else:
         __make_alpha_test(mat, principled, threshold)
+
+
+def __outline(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
+    """Only draw the back faces of outline shells, darkened like the game does.
+
+    Kirby's Return to Dream Land Deluxe gives most models an "_Outline" copy of their meshes (an inverted
+    hull) that the game pushes out along the normals and draws back faces only. The push is done at runtime
+    (OutlineThickness is 0 in the files), so the imported shell lies right on the model. Drawn front faces
+    and all, it covers the model with the outline's texture, which is wrong wherever that isn't the
+    texture underneath (e.g. the star on the present box).
+    """
+    if __render_info(fmat, "IsOutline") != 1:
+        return
+
+    tree = mat.node_tree
+    principled = mat_wrap.node_principled_bsdf
+    mat.use_backface_culling = False
+
+    # Only seen by the camera: rays leaving the surface under the shell (shadows, bounces) would hit its back
+    # faces and darken the model in Cycles. Outlines don't cast shadows in the game either.
+    geometry = tree.nodes.new(type="ShaderNodeNewGeometry")
+    geometry.label = "Outline"
+    geometry.location = principled.location.x - 850, principled.location.y - 600
+    light_path = tree.nodes.new(type="ShaderNodeLightPath")
+    light_path.location = geometry.location.x, geometry.location.y - 250
+    visible = tree.nodes.new(type="ShaderNodeMath")
+    visible.operation = "MULTIPLY"
+    visible.label = "Back Faces Only"
+    visible.location = geometry.location.x + 200, geometry.location.y
+    tree.links.new(geometry.outputs["Backfacing"], visible.inputs[0])
+    tree.links.new(light_path.outputs["Is Camera Ray"], visible.inputs[1])
+    alpha = visible.outputs["Value"]
+
+    alpha_input = principled.inputs["Alpha"]
+    if alpha_input.is_linked:
+        multiply = tree.nodes.new(type="ShaderNodeMath")
+        multiply.operation = "MULTIPLY"
+        multiply.location = visible.location.x + 200, visible.location.y
+        tree.links.new(alpha_input.links[0].from_socket, multiply.inputs[0])
+        tree.links.new(alpha, multiply.inputs[1])
+        alpha = multiply.outputs["Value"]
+    tree.links.new(alpha, alpha_input)
+
+    base_color = principled.inputs["Base Color"]
+    brightness = mat.get("MP_OutlineBrightness_NoKey")
+    if brightness is not None and base_color.is_linked:
+        darken = tree.nodes.new(type="ShaderNodeMix")
+        darken.data_type = "RGBA"
+        darken.blend_type = "MULTIPLY"
+        darken.label = "Outline Brightness"
+        darken.location = principled.location.x - 200, principled.location.y + 200
+        darken.inputs[0].default_value = 1.0
+        darken.inputs[7].default_value = (brightness, brightness, brightness, 1.0)
+        tree.links.new(base_color.links[0].from_socket, darken.inputs[6])
+        tree.links.new(darken.outputs[2], base_color)
+
+    if not hasattr(mat, "surface_render_method"):  # Blender < 4.2
+        if mat.blend_method == "OPAQUE":
+            mat.blend_method = "HASHED"
+            mat.shadow_method = "HASHED"
+    elif mat.surface_render_method != "BLENDED":
+        mat.surface_render_method = "DITHERED"
 
 
 def __make_alpha_test(mat: bpy.types.Material, principled, threshold: float):

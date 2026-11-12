@@ -1,10 +1,31 @@
 import logging
 
+import bpy
+
 from .material_importer import apply_texture_cutout, import_material
 from .mesh_importer import import_mesh
 from .skeleton_importer import import_fskl
 
 log = logging.getLogger(__name__)
+
+# How far outline shells are pushed out. The game sets this at runtime (OutlineThickness is 0 in the files).
+OUTLINE_THICKNESS = 0.01
+
+
+def add_outline_thickness(mesh_object):
+    """Push an outline shell (an inverted hull) out along its normals so it shows around the model.
+
+    Left where it is, it lies right on the model's surface, where Cycles can't tell the two apart.
+    The shell's normals are smoothed across its hard edges, so it's pushed along those to stay closed.
+    """
+    modifier = mesh_object.modifiers.new(name="Outline Thickness", type="DISPLACE")
+    modifier.mid_level = 0.0
+    modifier.strength = OUTLINE_THICKNESS
+    mesh = mesh_object.data
+    if getattr(mesh, "has_custom_normals", False) and (bpy.app.version >= (4, 1) or mesh.use_auto_smooth):
+        modifier.direction = "CUSTOM_NORMAL"
+    else:
+        modifier.direction = "NORMAL"
 
 
 class ModelImporter:
@@ -49,6 +70,9 @@ class ModelImporter:
             modifier.object = self.fskl_ob
             modifier.use_bone_envelopes = False
             modifier.use_vertex_groups = True
+
+            if mesh_object.active_material.get("RI_IsOutline") == 1:
+                add_outline_thickness(mesh_object)
 
         # Some alpha tests can only be told apart from other uses of the alpha by the meshes.
         for mat, objects in material_objects.items():

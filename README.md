@@ -24,6 +24,8 @@ Games that don't have these files, like Splatoon Raiders, work the same way. Tex
 
 Kirby and the Forgotten Land's `.bfres.cmp` files can be imported directly. Most models embed their textures. Stage models that don't, with "Texture Import Mode" set to "Automatic", get them from the `Tex_<hash>.bfres.cmp` files next to them and from the shared files in `gfx/Step/Decor/Motif`. Only the textures the model uses are imported from those.
 
+Kirby's Return to Dream Land Deluxe models come with "_Outline" copies of their meshes, which the game draws as outlines. These only show their back faces and get an "Outline Thickness" Displace modifier that pushes them out from the model; change its strength to make the outlines thicker or thinner, or set it to 0 to hide them.
+
 Textures that already exist in the blend file with the same name are reused instead of being imported again.
 
 ### Material Data
