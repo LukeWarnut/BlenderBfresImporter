@@ -140,6 +140,8 @@ def import_material(fmat: Material, texture_dict, name_prefix, wet_effect=False,
         case "Hoian_UBER":
             __shader_hoian(mat, mat_wrap)
 
+    __unnamed_albedo(fmat, mat, mat_wrap, unused_nodes)
+    __opacity_mask(mat, mat_wrap, unused_nodes)
     __layer_masked_albedo(mat, mat_wrap, unused_nodes)
     __face_pattern(mat, mat_wrap, unused_nodes)
     __second_layer(mat, mat_wrap, unused_nodes)
@@ -249,6 +251,54 @@ def __strand_graph(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper):
 
 # Frames of a texture pattern animation (e.g. eye expressions) are named "<texture>.00", "<texture>.01", ...
 PATTERN_FRAME = re.compile(r"\.\d\d$")
+
+
+def __unnamed_albedo(fmat: Material, mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper, unused_nodes):
+    """Use the first sampler's texture as the base color when no texture is named like one.
+
+    Kirby's Return to Dream Land Deluxe doesn't always name the albedo "<name>_BaseColor": e.g. Bronto Burt's
+    is "Bront.00" (its frames swap in other versions of the whole texture, like blinking eyes), and many eyes,
+    faces and props are the same. It's still in the first sampler and stored as sRGB, unlike the masks and
+    noise some effect materials have there instead.
+    """
+    if __render_info(fmat, "renderPass") is None:  # HAL's games (Kirby) only, their samplers are all "albedoN"
+        return
+    if mat_wrap.node_principled_bsdf.inputs["Base Color"].is_linked:
+        return
+    tex_ref = dict(zip(fmat.samplers.keys(), fmat.texture_refs)).get("_a0")
+    if tex_ref is None:
+        return
+    name = tex_ref.name
+    base_name = name.split(".", 1)[0]
+    if base_name.startswith("Env") or "Mask" in base_name:  # sphere mapped reflections, face pattern masks
+        return
+    entry = next((entry for entry in unused_nodes if entry[0] == name), None)
+    if entry is None or entry[1].image.colorspace_settings.name != "sRGB":
+        return
+
+    unused_nodes.remove(entry)
+    image = entry[1].image
+    mat.node_tree.nodes.remove(entry[1])
+    mat_wrap.base_color_texture.image = image
+
+
+def __opacity_mask(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper, unused_nodes):
+    """Use a grayscale "<name>_A" texture as the opacity.
+
+    Bronto Burt's wings (Kirby's Return to Dream Land Deluxe) have one: each wing is see-through in the middle
+    and solid towards the edge.
+    """
+    alpha_input = mat_wrap.node_principled_bsdf.inputs["Alpha"]
+    masks = [node for name, node in unused_nodes if name.split(".", 1)[0].rsplit("_", 1)[-1] == "A"]
+    if len(masks) != 1 or alpha_input.is_linked:
+        return
+
+    tree = mat.node_tree
+    separate = tree.nodes.new(type="ShaderNodeSeparateColor")
+    separate.label = "Opacity"
+    separate.location = masks[0].location.x + 300, masks[0].location.y
+    tree.links.new(masks[0].outputs["Color"], separate.inputs["Color"])
+    tree.links.new(separate.outputs[0], alpha_input)
 
 
 def __face_pattern(mat: bpy.types.Material, mat_wrap: PrincipledBSDFWrapper, unused_nodes):
